@@ -1,6 +1,16 @@
 import streamlit as st
 import pandas as pd
+import sys
+import os
 from datetime import datetime
+
+# Inject sister directory Private Oil Futures for the dynamic bridge
+PARENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FUTURES_PATH = os.path.abspath(os.path.join(PARENT_DIR, "Private Oil Futures"))
+if FUTURES_PATH not in sys.path:
+    sys.path.append(FUTURES_PATH)
+
+from src.bridge import evaluate_corporate_intrinsic_value
 from src.data import EnergyDataLoader
 from src.metrics import calculate_metrics, calculate_sustainability_ratios
 from src.plots import (
@@ -51,7 +61,35 @@ st.markdown("""
 @st.cache_data(ttl=3600)  # Cache for 1 hour
 def get_sector_data(tickers):
     loader = EnergyDataLoader(tickers=tickers)
-    df = loader.fetch_financials()
+    
+    backup_dir = "data"
+    backup_file = os.path.join(backup_dir, "backup_financials.csv")
+    os.makedirs(backup_dir, exist_ok=True)
+    
+    df = pd.DataFrame()
+    try:
+        df = loader.fetch_financials()
+    except Exception as e:
+        print(f"Error fetching live financials: {e}")
+        
+    if df is not None and not df.empty:
+        try:
+            df.to_csv(backup_file, index=False)
+            print("INFO: Live financials successfully cached to backup file.")
+        except Exception as e:
+            print(f"Error writing backup cache: {e}")
+    else:
+        # Failover to local backup file
+        if os.path.exists(backup_file):
+            try:
+                df = pd.read_csv(backup_file)
+                df["Date"] = pd.to_datetime(df["Date"], errors='coerce')
+                df = df[df["Ticker"].isin(tickers)]
+                print("WARNING: Live API throttling active. Running in offline backup mode.")
+                st.toast("📡 Live API rate-limited. Running in offline backup mode.", icon="⚠️")
+            except Exception as e:
+                print(f"Error loading backup cache: {e}")
+                
     if df.empty:
         return None
     return calculate_metrics(df)
@@ -70,7 +108,7 @@ with st.sidebar:
     )
     
     st.divider()
-    active_tab = st.radio("Analysis Mode", ["Current Snapshot", "Historical Trends", "Earnings Quality", "Dividend Sustainability", "Solvency Sentinel"])
+    active_tab = st.radio("Analysis Mode", ["Current Snapshot", "Historical Trends", "Earnings Quality", "Dividend Sustainability", "Solvency Sentinel", "Intrinsic Valuation Desk"])
     
     # Stress Test Controller (Phase 6)
     st.header("Risk Stress Test")
@@ -218,6 +256,159 @@ else:
                 - **High (> 2.0x)**: Potential constraint on shareholder returns.
                 """)
                 st.dataframe(latest_data[['Ticker', 'Total_Debt', 'Cash', 'Net_Debt', 'EBITDA', 'Leverage_Ratio']].sort_values('Leverage_Ratio'))
+
+        elif active_tab == "Intrinsic Valuation Desk":
+            st.header("⚖️ Asset Valuation Desk (DCF & WACC Calculator)")
+            st.write("Project Unlevered Free Cash Flows (UFCF) and discount them dynamically using live capital structures and energy growth models.")
+            
+            # Sub-selectors for valuation customization
+            v_col1, v_col2 = st.columns(2)
+            with v_col1:
+                val_ticker = st.selectbox("Select Target Ticker for Valuation", tickers)
+            
+            # Let's get the default WACC and growth rates so we can pre-populate defaults or show overrides
+            with st.spinner("Initializing valuation models..."):
+                try:
+                    base_eval = evaluate_corporate_intrinsic_value(val_ticker, scenario="base")
+                except Exception as e:
+                    st.error(f"Valuation Engine error: {e}")
+                    base_eval = {
+                        "wacc": 0.08, "terminal_growth": 0.015, "current_price": 100.0,
+                        "ebitda_margin": 0.30, "implied_share_price": 100.0, "upside_percent": 0.0,
+                        "enterprise_value": 0.0, "net_debt": 0.0, "equity_value": 0.0,
+                        "shares_outstanding": 1.0, "projected_fcfs": [0.0]*5, "projected_revenues": [0.0]*5,
+                        "percent_value_from_tv": 0.5
+                    }
+            
+            with v_col2:
+                scenario_sel = st.selectbox(
+                    "Active Oil Price Scenario",
+                    ["Bear Scenario ($60 Oil)", "Base Scenario ($85 Oil)", "Bull Scenario ($110 Oil)"],
+                    index=1
+                )
+                scen_key = "low" if "Bear" in scenario_sel else "base" if "Base" in scenario_sel else "high"
+                
+            # Sliders for parameters in columns
+            p_col1, p_col2 = st.columns(2)
+            with p_col1:
+                custom_wacc_val = st.slider(
+                    "Cost of Capital / WACC Override (%)",
+                    min_value=4.0, max_value=16.0,
+                    value=float(base_eval["wacc"] * 100.0),
+                    step=0.25,
+                    help="The discount rate used to present value future cash flows. Defaults to CAPM-derived WACC."
+                ) / 100.0
+            with p_col2:
+                custom_g_val = st.slider(
+                    "Terminal Growth Rate Override (%)",
+                    min_value=-3.0, max_value=5.0,
+                    value=float(base_eval["terminal_growth"] * 100.0),
+                    step=0.25,
+                    help="The perpetual growth rate of cash flows beyond Year 5. Legacy oil majors are typically modeled in decline (-1.5% to +1.0%)."
+                ) / 100.0
+                
+            # Perform valuation run
+            with st.spinner("Computing DCF pathways..."):
+                active_eval = evaluate_corporate_intrinsic_value(
+                    val_ticker, 
+                    scenario=scen_key, 
+                    custom_wacc=custom_wacc_val, 
+                    custom_terminal_growth=custom_g_val
+                )
+                
+                # Also generate the other scenarios for sensitivity graphing
+                bear_eval = evaluate_corporate_intrinsic_value(
+                    val_ticker, 
+                    scenario="low", 
+                    custom_wacc=custom_wacc_val, 
+                    custom_terminal_growth=custom_g_val
+                )
+                bull_eval = evaluate_corporate_intrinsic_value(
+                    val_ticker, 
+                    scenario="high", 
+                    custom_wacc=custom_wacc_val, 
+                    custom_terminal_growth=custom_g_val
+                )
+                
+            # Metric cards
+            st.markdown('<div class="snapshot-card" style="border-left: 5px solid #00FF88; margin-top:20px;">', unsafe_allow_html=True)
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("DCF Intrinsic Price", f"${active_eval['implied_share_price']:.2f}")
+            m2.metric("Current Market Price", f"${active_eval['current_price']:.2f}")
+            
+            upside = active_eval['upside_percent']
+            m3.metric(
+                "Implied Upside", 
+                f"{upside:+.1%}",
+                delta=f"{active_eval['implied_share_price'] - active_eval['current_price']:+.2f}"
+            )
+            
+            m4.metric("EBITDA Margin", f"{active_eval['ebitda_margin']:.1%}")
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            # Two panel workspace (Metrics vs Sensitivity Plotly Chart)
+            ws_col1, ws_col2 = st.columns([1, 1])
+            with ws_col1:
+                st.subheader("5-Year Projection Pathway ($B)")
+                # Build beautiful pandas dataframe of projections
+                proj_years = [f"Year {i+1}" for i in range(5)]
+                proj_df = pd.DataFrame({
+                    "Forecast Year": proj_years,
+                    "Projected Revenue ($B)": [r / 1e9 for r in active_eval["projected_revenues"]],
+                    "Projected UFCF ($B)": [f / 1e9 for f in active_eval["projected_fcfs"]]
+                })
+                proj_df["Projected Revenue ($B)"] = proj_df["Projected Revenue ($B)"].map("${:,.2f}B".format)
+                proj_df["Projected UFCF ($B)"] = proj_df["Projected UFCF ($B)"].map("${:,.2f}B".format)
+                st.dataframe(proj_df, use_container_width=True, hide_index=True)
+                
+                # Additional valuation breakdown stats
+                st.markdown(f"""
+                **Valuation Breakdown Details**:
+                *   **Enterprise Value (EV)**: `${active_eval['enterprise_value']/1e9:.2f}B`
+                *   **Less Net Debt**: `${active_eval['net_debt']/1e9:.2f}B`
+                *   **Implied Equity Value**: `${active_eval['equity_value']/1e9:.2f}B`
+                *   **Shares Outstanding**: `{active_eval['shares_outstanding']/1e9:.2f}B shares`
+                *   **Terminal Value Contribution**: `{active_eval['percent_value_from_tv']:.1%}` of Enterprise Value comes from terminal cash flow.
+                """)
+                
+            with ws_col2:
+                st.subheader("Scenario Valuation Sensitivity ($)")
+                # Plotly Chart comparing Bear ($60), Base ($85), Bull ($110)
+                import plotly.graph_objects as go
+                
+                scen_labels = ["Bear Case ($60)", "Base Case ($85)", "Bull Case ($110)"]
+                prices = [bear_eval["implied_share_price"], base_eval["implied_share_price"], bull_eval["implied_share_price"]]
+                colors = ['#FF3366', '#FFB900', '#00FF88']  # Red, Yellow, Green
+                
+                fig_val = go.Figure()
+                fig_val.add_trace(go.Bar(
+                    x=scen_labels,
+                    y=[max(0, p) for p in prices],
+                    marker_color=colors,
+                    text=[f"${p:.2f}" for p in prices],
+                    textposition='auto',
+                    name="DCF Target"
+                ))
+                
+                # Add horizontal line for current price
+                fig_val.add_hline(
+                    y=active_eval["current_price"],
+                    line_dash="dash",
+                    line_color="#FFFFFF",
+                    annotation_text=f"Market: ${active_eval['current_price']:.2f}",
+                    annotation_position="top left",
+                    annotation_font=dict(color="#FFFFFF")
+                )
+                
+                fig_val.update_layout(
+                    template="plotly_dark",
+                    plot_bgcolor="#1e1e1e",
+                    paper_bgcolor="#121212",
+                    margin=dict(l=40, r=40, t=30, b=40),
+                    height=350,
+                    yaxis=dict(title="Share Price ($)")
+                )
+                st.plotly_chart(fig_val, use_container_width=True)
 
         # --- ADVANCED AUDIT LOG ---
         with st.expander("🛠️ Advanced Architectural Audit"):

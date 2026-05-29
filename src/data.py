@@ -59,7 +59,7 @@ class EnergyDataLoader:
         """Fetches annual cash flow, income, and balance sheet data."""
         all_data = []
         for ticker in self.tickers:
-            print(f"📡 Fetching live data for {ticker}...")
+            print(f"INFO: Fetching live data for {ticker}...")
             stock = yf.Ticker(ticker)
             
             # Fetch TTM/Annual sheets
@@ -68,7 +68,7 @@ class EnergyDataLoader:
             bs = stock.balance_sheet
             
             if cf.empty:
-                print(f"⚠️ Warning: No cash flow data for {ticker}")
+                print(f"WARNING: No cash flow data for {ticker}")
                 continue
 
             # Standardizing Data
