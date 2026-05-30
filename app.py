@@ -10,7 +10,7 @@ FUTURES_PATH = os.path.abspath(os.path.join(PARENT_DIR, "Private Oil Futures"))
 if FUTURES_PATH not in sys.path:
     sys.path.append(FUTURES_PATH)
 
-from src.bridge import evaluate_corporate_intrinsic_value
+from src.bridge import evaluate_corporate_intrinsic_value, simulate_corporate_monte_carlo
 from src.data import EnergyDataLoader
 from src.metrics import calculate_metrics, calculate_sustainability_ratios
 from src.plots import (
@@ -409,6 +409,91 @@ else:
                     yaxis=dict(title="Share Price ($)")
                 )
                 st.plotly_chart(fig_val, use_container_width=True)
+
+            st.divider()
+            st.subheader("🎰 Monte Carlo Intrinsic Valuation Simulator")
+            st.write("Simulate 5,000 randomized cash flow paths. Standard deviations for revenue growth and EBITDA margins are dynamically shocked by the primary commodity's volatility, and base growth is driven by neural return drifts.")
+            
+            with st.spinner("Simulating 5,000 valuation paths..."):
+                try:
+                    mc_res = simulate_corporate_monte_carlo(
+                        val_ticker,
+                        expected_return_shift=0.0,  # baseline neutral expectation
+                        ewma_vol=0.18,  # baseline baseline crude volatility
+                        custom_wacc=custom_wacc_val,
+                        custom_terminal_growth=custom_g_val,
+                        num_trials=5000
+                    )
+                except Exception as e:
+                    st.error(f"Monte Carlo Engine error: {e}")
+                    mc_res = None
+                    
+            if mc_res:
+                # 3 KPI Cards for Monte Carlo Summary
+                mc_col1, mc_col2, mc_col3 = st.columns(3)
+                with mc_col1:
+                    st.metric("Median Simulated Price", f"${mc_res['p50']:.2f}", 
+                              help="The 50th percentile of all simulated DCF targets.")
+                with mc_col2:
+                    mos = mc_res['margin_of_safety']
+                    mos_pct = f"{mos:+.1%}"
+                    if mos >= 0.15:
+                        mos_status = "🟢 Safe Margin of Safety"
+                    elif mos >= 0.0:
+                        mos_status = "🟡 Caution (Narrow Margin)"
+                    else:
+                        mos_status = "🔴 High Risk (Overvalued)"
+                    st.metric("Margin of Safety (MoS)", mos_pct, mos_status)
+                with mc_col3:
+                    st.metric("Probability of Upside", f"{mc_res['prob_upside']:.1%}", 
+                              help="The percentage of simulated paths where intrinsic value exceeds current market price.")
+                    
+                # Plotly Probability Density Function Histogram
+                import plotly.graph_objects as go
+                
+                prices_vec = mc_res["implied_prices"]
+                
+                fig_mc = go.Figure()
+                fig_mc.add_trace(go.Histogram(
+                    x=prices_vec,
+                    histnorm='probability density',
+                    name='Simulated Targets',
+                    marker_color='#FFB900',
+                    opacity=0.6,
+                    nbinsx=80
+                ))
+                
+                # Vertical lines for thresholds
+                fig_mc.add_vline(x=mc_res["current_price"], line_dash="dash", line_color="#FFFFFF", line_width=2)
+                fig_mc.add_annotation(x=mc_res["current_price"], y=0.01, text=f"Market: ${mc_res['current_price']:.2f}",
+                                      showarrow=True, arrowhead=1, font=dict(color="#FFFFFF"))
+                                      
+                fig_mc.add_vline(x=mc_res["p50"], line_color="#00FF88", line_width=2.5)
+                fig_mc.add_annotation(x=mc_res["p50"], y=0.02, text=f"Median: ${mc_res['p50']:.2f}",
+                                      showarrow=True, arrowhead=1, font=dict(color="#00FF88"))
+                                      
+                fig_mc.add_vline(x=mc_res["p10"], line_dash="dot", line_color="#FF3366", line_width=1.5)
+                fig_mc.add_vline(x=mc_res["p90"], line_dash="dot", line_color="#00D7FF", line_width=1.5)
+                
+                fig_mc.update_layout(
+                    template="plotly_dark",
+                    plot_bgcolor="#1e1e1e",
+                    paper_bgcolor="#121212",
+                    title=f"Valuation Probability Density Curve: {val_ticker} (5,000 Vectorized Trials)",
+                    margin=dict(l=40, r=40, t=50, b=40),
+                    height=380,
+                    xaxis=dict(title="Simulated Intrinsic Share Price ($)", range=[max(0, mc_res["p50"]*0.2), mc_res["p50"]*1.8]),
+                    yaxis=dict(title="Probability Density", showgrid=False)
+                )
+                
+                st.plotly_chart(fig_mc, use_container_width=True)
+                
+                st.markdown(f"""
+                **Monte Carlo Audit Trail**:
+                *   **Simulated Target range (80% confidence)**: `${mc_res['p10']:.2f}` to `${mc_res['p90']:.2f}` per share.
+                *   **Trial Mean WACC**: `{mc_res['mean_wacc']:.2%}` | **Trial Mean Terminal Growth**: `{mc_res['mean_g']:.2%}`
+                *   *Attribution:* Margin variance uses a baseline crude EWMA volatility of `18.0%` with a neural return shift of `0.0%`.
+                """)
 
         # --- ADVANCED AUDIT LOG ---
         with st.expander("🛠️ Advanced Architectural Audit"):
