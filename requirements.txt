@@ -1,10 +1,9 @@
-# Post-COVID Energy Capital Discipline Monitor
-# Deployment requirements — Linux/Streamlit Cloud
-# Python 3.11
+# Energy Capital Discipline Monitor — Streamlit Cloud deployment
+# Lean runtime dependencies only
 
-streamlit==1.35.0
-pandas==2.2.2
-numpy==1.26.4
-plotly==5.22.0
-yfinance==0.2.40
-requests==2.32.3
+streamlit>=1.35.0
+pandas>=2.0.0
+numpy>=1.24.0
+plotly>=5.18.0
+yfinance>=0.2.40
+requests>=2.28.0
